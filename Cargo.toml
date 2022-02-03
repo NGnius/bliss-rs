@@ -39,7 +39,7 @@ lazy_static = "1.4.0"
 rayon = "1.5.0"
 crossbeam = "0.8.0"
 noisy_float = "0.2.0"
-symphonia = { version = "0.5", features = ["mp3", "aac"]}
+symphonia = { version = "0.5", features = ["mp3", "aac", "alac"]}
 rubato = { version = "0.12" }
 log = "0.4.14"
 env_logger = "0.8.3"
