@@ -1,12 +1,12 @@
 [package]
 name = "bliss-audio-symphonia"
 version = "0.6.5"
-authors = ["Polochon-street <polochonstreet@gmx.fr>"]
+authors = ["Polochon-street <polochonstreet@gmx.fr>", "NGnius (Graham) <ngniusness@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-only"
 description = "A song analysis library for making playlists"
 homepage = "https://lelele.io/bliss.html"
-repository = "https://github.com/Polochon-street/bliss-rs"
+repository = "https://github.com/NGnius/bliss-rs"
 keywords = ["audio", "analysis", "MIR", "playlist", "similarity"]
 readme = "README.md"
 

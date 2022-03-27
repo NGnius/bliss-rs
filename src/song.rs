@@ -497,7 +497,6 @@ impl Song {
                 song.read_tags(revision);
             }
         }
-
         let (tx, rx) = mpsc::channel();
         let child = std_thread::spawn(move || {
             resample_buffer(

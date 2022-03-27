@@ -1,3 +1,5 @@
+A modified version of the bliss-audio to remove ffmpeg and replace it with Rust's symphonia library.
+
 [![crate](https://img.shields.io/crates/v/bliss-audio.svg)](https://crates.io/crates/bliss-audio)
 [![build](https://github.com/Polochon-street/bliss-rs/workflows/Rust/badge.svg)](https://github.com/Polochon-street/bliss-rs/actions)
 [![doc](https://docs.rs/bliss-audio/badge.svg)](https://docs.rs/bliss-audio/)
@@ -103,10 +105,9 @@ To cross-compile bliss-rs from linux to x86_64 windows, install the
 
 Make sure you have `x86_64-w64-mingw32-gcc` installed on your computer.
 
-Then after downloading and extracting [ffmpeg's prebuilt binaries](https://www.gyan.dev/ffmpeg/builds/),
-running:
+Then run:
 
-        FFMPEG_DIR=/path/to/prebuilt/ffmpeg cargo build --target x86_64-pc-windows-gnu --release
+        cargo build --target x86_64-pc-windows-gnu --release
 
 Will produce a `.rlib` library file. If you want to generate a shared `.dll`
 library, add:
@@ -122,13 +123,7 @@ library, add:
 
 You can of course test the examples yourself by compiling them as .exe:
 
-        FFMPEG_DIR=/path/to/prebuilt/ffmpeg cargo build --target x86_64-pc-windows-gnu --release --examples
-
-WARNING: Doing all of the above and making it work on windows requires to have
-ffmpeg's dll on your Windows `%PATH%` (`avcodec-59.dll`, etc).
-Usually installing ffmpeg on the target windows is enough, but you can also just
-extract them from `/path/to/prebuilt/ffmpeg/bin` and put them next to the thing
-you generated from cargo (either bliss' dll or executable).
+        cargo build --target x86_64-pc-windows-gnu --release --examples
 
 ## Acknowledgements
 
