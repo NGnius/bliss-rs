@@ -91,7 +91,7 @@ use thiserror::Error;
 
 pub use song::{Analysis, AnalysisIndex, Song, NUMBER_FEATURES};
 
-const CHANNELS: u16 = 1;
+//const CHANNELS: u16 = 1;
 const SAMPLE_RATE: u32 = 22050;
 /// Stores the current version of bliss-rs' features.
 /// It is bumped every time one or more feature is added, updated or removed,
@@ -291,27 +291,21 @@ mod tests {
                 false,
                 PathBuf::from("./data/testcue.cue"),
                 Some(String::from(
-                    "error happened while decoding file – while \
-                            opening format for file './data/not-existing.wav': \
-                            ffmpeg::Error(2: No such file or directory).",
+                    "error happened while decoding file – while opening song: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }.",
                 )),
             ),
             (
                 false,
                 PathBuf::from("definitely-not-existing.foo"),
                 Some(String::from(
-                    "error happened while decoding file – while \
-                            opening format for file 'definitely-not-existing\
-                            .foo': ffmpeg::Error(2: No such file or directory).",
+                    "error happened while decoding file – while opening song: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }.",
                 )),
             ),
             (
                 false,
                 PathBuf::from("not-existing.foo"),
                 Some(String::from(
-                    "error happened while decoding file – \
-                            while opening format for file 'not-existing.foo': \
-                            ffmpeg::Error(2: No such file or directory).",
+                    "error happened while decoding file – while opening song: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }.",
                 )),
             ),
             (true, PathBuf::from("./data/s16_mono_22_5kHz.flac"), None),

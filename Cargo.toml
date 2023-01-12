@@ -1,5 +1,5 @@
 [package]
-name = "bliss-audio"
+name = "bliss-audio-symphonia"
 version = "0.6.5"
 authors = ["Polochon-street <polochonstreet@gmx.fr>"]
 edition = "2018"
@@ -17,8 +17,6 @@ no-default-features = true
 [features]
 default = ["bliss-audio-aubio-rs/static"]
 # Build ffmpeg instead of using the host's.
-build-ffmpeg = ["ffmpeg-next/build"]
-ffmpeg-static = ["ffmpeg-next/static"]
 # Use if you want to build python bindings with maturin.
 python-bindings = ["bliss-audio-aubio-rs/fftw3"]
 # Enable the benchmarks with `cargo +nightly bench --features=bench`
@@ -41,7 +39,8 @@ lazy_static = "1.4.0"
 rayon = "1.5.0"
 crossbeam = "0.8.0"
 noisy_float = "0.2.0"
-ffmpeg-next = "5.1.1"
+symphonia = { version = "0.5", features = ["mp3", "aac"]}
+rubato = { version = "0.12" }
 log = "0.4.14"
 env_logger = "0.8.3"
 thiserror = "1.0.24"

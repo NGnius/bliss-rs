@@ -1,6 +1,6 @@
 use anyhow::Result;
-use bliss_audio::playlist::{closest_to_first_song, dedup_playlist, euclidean_distance};
-use bliss_audio::{analyze_paths, Song};
+use bliss_audio_symphonia::playlist::{closest_to_first_song, dedup_playlist, euclidean_distance};
+use bliss_audio_symphonia::{analyze_paths, Song};
 use clap::{App, Arg};
 use glob::glob;
 use std::env;

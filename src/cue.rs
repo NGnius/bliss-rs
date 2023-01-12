@@ -201,7 +201,7 @@ mod tests {
         let error = songs[0].to_owned().unwrap_err();
         assert_eq!(
             error,
-            BlissError::DecodingError("empty audio file associated to CUE sheet".to_string())
+            BlissError::DecodingError("while opening format: DecodeError(\"wav: chunk length exceeds parent (list) chunk length\").".to_string())
         );
     }
 
@@ -330,8 +330,7 @@ mod tests {
                 ..Default::default()
             }),
             Err(BlissError::DecodingError(String::from(
-                "while opening format for file 'data/not-existing.wav': \
-                ffmpeg::Error(2: No such file or directory).",
+                "while opening song: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }.",
             ))),
         ];
         assert_eq!(expected, songs);

@@ -8,7 +8,8 @@
 //! a look at Library is instead recommended.
 
 extern crate crossbeam;
-extern crate ffmpeg_next as ffmpeg;
+//extern crate ffmpeg_next as ffmpeg;
+extern crate symphonia;
 extern crate ndarray;
 extern crate ndarray_npy;
 
@@ -21,19 +22,18 @@ use crate::playlist::{closest_to_first_song, dedup_playlist, euclidean_distance,
 use crate::temporal::BPMDesc;
 use crate::timbral::{SpectralDesc, ZeroCrossingRateDesc};
 use crate::{BlissError, BlissResult, SAMPLE_RATE};
-use crate::{CHANNELS, FEATURES_VERSION};
+use crate::{FEATURES_VERSION};
 use ::log::warn;
 use core::ops::Index;
 use crossbeam::thread;
-use ffmpeg_next::codec::threading::{Config, Type as ThreadingType};
-use ffmpeg_next::util::channel_layout::ChannelLayout;
-use ffmpeg_next::util::error::Error;
-use ffmpeg_next::util::error::EINVAL;
-use ffmpeg_next::util::format::sample::{Sample, Type};
-use ffmpeg_next::util::frame::audio::Audio;
-use ffmpeg_next::util::log;
-use ffmpeg_next::util::log::level::Level;
-use ffmpeg_next::{media, util};
+use symphonia::core::formats::{SeekMode, SeekTo};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::probe::Hint;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Signal};
+use symphonia::core::meta::{MetadataRevision, StandardTagKey};
+use rubato::Resampler;
+use rubato::FftFixedIn as ResamplerImpl;
 use ndarray::{arr1, Array1};
 use std::convert::TryInto;
 use std::fmt;
@@ -133,7 +133,7 @@ pub const NUMBER_FEATURES: usize = AnalysisIndex::COUNT;
 /// Only use it if you want to have an in-depth look of what is
 /// happening behind the scene, or make a distance metric yourself.
 ///
-/// Under the hood, it is just an array of f32 holding different numeric
+/// Under the hood, it is just an array of f32 holding different nsrcumeric
 /// features.
 ///
 /// For more info on the different features, build the
@@ -422,205 +422,123 @@ impl Song {
     }
 
     pub(crate) fn decode(path: &Path) -> BlissResult<InternalSong> {
-        ffmpeg::init().map_err(|e| {
-            BlissError::DecodingError(format!(
-                "ffmpeg init error while decoding file '{}': {:?}.",
-                path.display(),
-                e
-            ))
-        })?;
-        log::set_level(Level::Quiet);
+        let registry = symphonia::default::get_codecs();
+        let probe = symphonia::default::get_probe();
         let mut song = InternalSong {
             path: path.into(),
             ..Default::default()
         };
-        let mut ictx = ffmpeg::format::input(&path).map_err(|e| {
-            BlissError::DecodingError(format!(
-                "while opening format for file '{}': {:?}.",
-                path.display(),
-                e
-            ))
-        })?;
-        let (mut decoder, stream, expected_sample_number) = {
-            let input = ictx.streams().best(media::Type::Audio).ok_or_else(|| {
-                BlissError::DecodingError(format!(
-                    "No audio stream found for file '{}'.",
-                    path.display()
-                ))
-            })?;
-            let mut context = ffmpeg::codec::context::Context::from_parameters(input.parameters())
-                .map_err(|e| {
-                    BlissError::DecodingError(format!(
-                        "Could not load the codec context for file '{}': {:?}",
-                        path.display(),
-                        e
-                    ))
-                })?;
-            context.set_threading(Config {
+        let song_file = std::fs::File::open(path).map_err(|e| BlissError::DecodingError(format!("while opening song: {:?}.", e)))?;
+        let stream = MediaSourceStream::new(Box::new(song_file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|x| x.to_str()) {
+            hint.with_extension(ext);
+        }
+        let mut probed = probe.format(&hint, stream, &Default::default(), &Default::default())
+            .map_err(|e| BlissError::DecodingError(format!("while opening format: {:?}.", e)))?;
+        let format = &mut probed.format;
+        /*let mut format = ffmpeg::format::input(&path)
+            .map_err(|e| BlissError::DecodingError(format!("while opening format: {:?}.", e)))?;*/
+        let (mut codec, stream_id, expected_sample_number) = {
+            let track = format
+                .tracks()
+                .into_iter()
+                .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+                .ok_or_else(|| BlissError::DecodingError(String::from("No valid audio stream found.")))?;
+            let track_id = track.id;
+            /*let stream = format
+                .streams()
+                .find(|s| s.codec().medium() == ffmpeg::media::Type::Audio)
+                .ok_or_else(|| BlissError::DecodingError(String::from("No audio stream found.")))?;*/
+            /*stream.codec().set_threading(Config {
                 kind: ThreadingType::Frame,
                 count: 0,
                 safe: true,
-            });
-            let decoder = context.decoder().audio().map_err(|e| {
-                BlissError::DecodingError(format!(
-                    "when finding decoder for file '{}': {:?}.",
-                    path.display(),
-                    e
-                ))
-            })?;
-
-            // Add SAMPLE_RATE to have one second margin to avoid reallocating if
-            // the duration is slightly more than estimated
-            // TODO>1.0 another way to get the exact number of samples is to decode
-            // everything once, compute the real number of samples from that,
-            // allocate the array with that number, and decode again. Check
-            // what's faster between reallocating, and just have one second
-            // leeway.
-            let expected_sample_number = (SAMPLE_RATE as f32 * input.duration() as f32
-                / input.time_base().denominator() as f32)
-                .ceil()
-                + SAMPLE_RATE as f32;
-            (decoder, input.index(), expected_sample_number)
-        };
-        let sample_array: Vec<f32> = Vec::with_capacity(expected_sample_number as usize);
-        if let Some(title) = ictx.metadata().get("title") {
-            song.title = match title {
-                "" => None,
-                t => Some(t.to_string()),
-            };
-        };
-        if let Some(artist) = ictx.metadata().get("artist") {
-            song.artist = match artist {
-                "" => None,
-                a => Some(a.to_string()),
-            };
-        };
-        if let Some(album) = ictx.metadata().get("album") {
-            song.album = match album {
-                "" => None,
-                a => Some(a.to_string()),
-            };
-        };
-        if let Some(genre) = ictx.metadata().get("genre") {
-            song.genre = match genre {
-                "" => None,
-                g => Some(g.to_string()),
-            };
-        };
-        if let Some(track_number) = ictx.metadata().get("track") {
-            song.track_number = match track_number {
-                "" => None,
-                t => Some(t.to_string()),
-            };
-        };
-        if let Some(album_artist) = ictx.metadata().get("album_artist") {
-            song.album_artist = match album_artist {
-                "" => None,
-                t => Some(t.to_string()),
-            };
-        };
-        let in_channel_layout = {
-            if decoder.channel_layout() == ChannelLayout::empty() {
-                ChannelLayout::default(decoder.channels().into())
-            } else {
-                decoder.channel_layout()
-            }
-        };
-        decoder.set_channel_layout(in_channel_layout);
-
-        let (tx, rx) = mpsc::channel();
-        let in_codec_format = decoder.format();
-        let in_codec_rate = decoder.rate();
-        let child = std_thread::spawn(move || {
-            resample_frame(
-                rx,
-                in_codec_format,
-                in_channel_layout,
-                in_codec_rate,
-                sample_array,
-            )
-        });
-        for (s, packet) in ictx.packets() {
-            if s.index() != stream {
-                continue;
-            }
-            match decoder.send_packet(&packet) {
-                Ok(_) => (),
-                Err(Error::Other { errno: EINVAL }) => {
-                    return Err(BlissError::DecodingError(format!(
-                        "wrong codec opened for file '{}.",
-                        path.display(),
-                    )))
-                }
-                Err(Error::Eof) => {
-                    warn!(
-                        "Premature EOF reached while decoding file '{}'.",
-                        path.display()
-                    );
-                    drop(tx);
-                    song.sample_array = child.join().unwrap()?;
-                    return Ok(song);
-                }
-                Err(e) => warn!("error while decoding file '{}': {}", path.display(), e),
-            };
-
-            loop {
-                let mut decoded = ffmpeg::frame::Audio::empty();
-                match decoder.receive_frame(&mut decoded) {
-                    Ok(_) => {
-                        tx.send(decoded).map_err(|e| {
-                            BlissError::DecodingError(format!(
-                                "while sending decoded frame to the resampling thread for file '{}': {:?}",
-                                path.display(),
-                                e,
-                            ))
-                        })?;
+            });*/
+            let mut decoder = registry
+                .make(&track.codec_params, &Default::default())
+                .map_err(|e| BlissError::DecodingError(format!("when finding codec: {:?}.", e)))?;
+            /*let codec =
+                stream.codec().decoder().audio().map_err(|e| {
+                    BlissError::DecodingError(format!("when finding codec: {:?}.", e))
+                })?;*/
+            let mut expected_sample_number: usize = 0;
+            // decode once to find sample number
+            // previously, ffmpeg let us (roughly) calculate this
+            // symphonia does not make that easy so we just decode twice instead
+            while let Ok(packet) = format.next_packet() {
+                if packet.track_id() == track_id {
+                    if let Ok(buffer) = decoder.decode(&packet) {
+                        // errors will only be handled when actually decoding samples
+                        expected_sample_number += sample_buffer_length(buffer);
                     }
-                    Err(_) => break,
-                }
+                } // else ignore packet
+            }
+            // reset decoding to start of audio
+            format.seek(SeekMode::Accurate, SeekTo::Time {
+                time: symphonia::core::units::Time {
+                    seconds: 0,
+                    frac: 0.0,
+                },
+                track_id: Some(track_id),
+            }).map_err(|e| BlissError::DecodingError(format!("while seeking to start: {}", e)))?;
+            decoder.reset();
+            (decoder, track_id, expected_sample_number)
+        };
+        let sample_array: Vec<f32> = Vec::with_capacity(expected_sample_number);
+        // populate song metadata from file's info tags
+        if let Some(revision) = format.metadata().current() {
+            // audio format's built-in tags
+            song.read_tags(revision);
+        }
+        if let Some(metadata) = probed.metadata.get() {
+            if let Some(revision) = metadata.current() {
+                // audio wrapper's tags
+                song.read_tags(revision);
             }
         }
 
-        // Flush the stream
-        let packet = ffmpeg::codec::packet::Packet::empty();
-        match decoder.send_packet(&packet) {
-            Ok(_) => (),
-            Err(Error::Other { errno: EINVAL }) => {
-                return Err(BlissError::DecodingError(format!(
-                    "wrong codec opened for file '{}'.",
-                    path.display()
-                )))
-            }
-            Err(Error::Eof) => {
-                warn!(
-                    "Premature EOF reached while decoding file '{}'.",
-                    path.display()
-                );
-                drop(tx);
-                song.sample_array = child.join().unwrap()?;
-                return Ok(song);
-            }
-            Err(e) => warn!("error while decoding {}: {}", path.display(), e),
-        };
-
+        let (tx, rx) = mpsc::channel();
+        let child = std_thread::spawn(move || {
+            resample_buffer(
+                rx,
+                sample_array,
+            )
+        });
         loop {
-            let mut decoded = ffmpeg::frame::Audio::empty();
-            match decoder.receive_frame(&mut decoded) {
-                Ok(_) => {
-                    tx.send(decoded).map_err(|e| {
+            let packet = match format.next_packet() {
+                Err(SymphoniaError::IoError(_)) => break,
+                Ok(packet) => packet,
+                Err(e) => return Err(BlissError::DecodingError(format!("while reading packet: {}", e)))
+            };
+            if packet.track_id() != stream_id {
+                continue;
+            }
+            match codec.decode(&packet) {
+                Ok(decoded) => {
+                    tx.send(convert_sample_buffer(decoded)).map_err(|e| {
                         BlissError::DecodingError(format!(
                             "while sending decoded frame to the resampling thread for file '{}': {:?}",
                             path.display(),
                             e
                         ))
                     })?;
+                },
+                Err(SymphoniaError::Unsupported(s)) => {
+                    return Err(BlissError::DecodingError(format!("unsupported: {}", s)))
                 }
-                Err(_) => break,
-            }
+                Err(SymphoniaError::IoError(e)) => {
+                    warn!("IO error occured while decoding: {}", e);
+                    drop(tx);
+                    song.sample_array = child.join().unwrap()?;
+                    return Ok(song);
+                },
+                Err(e) => warn!("error while decoding {}: {}", path.display(), e),
+            };
         }
 
         drop(tx);
-        song.sample_array = child.join().unwrap()?;
+        song.sample_array = child.join().map_err(|_| BlissError::DecodingError(format!("resampler thread panic!")))??;
         let duration_seconds = song.sample_array.len() as f32 / SAMPLE_RATE as f32;
         song.duration = Duration::from_nanos((duration_seconds * 1e9_f32).round() as u64);
         Ok(song)
@@ -640,93 +558,163 @@ pub(crate) struct InternalSong {
     pub sample_array: Vec<f32>,
 }
 
-fn resample_frame(
-    rx: Receiver<Audio>,
-    in_codec_format: Sample,
-    in_channel_layout: ChannelLayout,
-    in_rate: u32,
-    mut sample_array: Vec<f32>,
-) -> BlissResult<Vec<f32>> {
-    let mut resample_context = ffmpeg::software::resampling::context::Context::get(
-        in_codec_format,
-        in_channel_layout,
-        in_rate,
-        Sample::F32(Type::Packed),
-        ffmpeg::util::channel_layout::ChannelLayout::MONO,
-        SAMPLE_RATE,
-    )
-    .map_err(|e| {
-        BlissError::DecodingError(format!(
-            "while trying to allocate resampling context: {:?}",
-            e
-        ))
-    })?;
-    let mut resampled = ffmpeg::frame::Audio::empty();
-    let mut something_happened = false;
-    for decoded in rx.iter() {
-        if in_codec_format != decoded.format()
-            || (in_channel_layout != decoded.channel_layout())
-                // If the decoded layout is empty, it means we forced the
-                // "in_channel_layout" to something default, not that
-                // the format is wrong.
-                && (decoded.channel_layout() != ChannelLayout::empty())
-            || in_rate != decoded.rate()
-        {
-            warn!("received decoded packet with wrong format; file might be corrupted.");
-            continue;
-        }
-        something_happened = true;
-        resampled = ffmpeg::frame::Audio::empty();
-        resample_context
-            .run(&decoded, &mut resampled)
-            .map_err(|e| {
-                BlissError::DecodingError(format!("while trying to resample song: {:?}", e))
-            })?;
-        push_to_sample_array(&resampled, &mut sample_array);
-    }
-    if !something_happened {
-        return Ok(sample_array);
-    }
-    // TODO when ffmpeg-next will be active again: shouldn't we allocate
-    // `resampled` again?
-    loop {
-        match resample_context.flush(&mut resampled).map_err(|e| {
-            BlissError::DecodingError(format!("while trying to resample song: {:?}", e))
-        })? {
-            Some(_) => {
-                push_to_sample_array(&resampled, &mut sample_array);
-            }
-            None => {
-                if resampled.samples() == 0 {
-                    break;
+impl InternalSong {
+    #[inline]
+    fn read_tags(&mut self, metadata: &MetadataRevision) {
+        for tag in metadata.tags() {
+            if let Some(key) = tag.std_key {
+                match key {
+                    StandardTagKey::Album => self.album = Some(tag.value.to_string()),
+                    StandardTagKey::AlbumArtist => self.album_artist = Some(tag.value.to_string()),
+                    StandardTagKey::TrackTitle => self.title = Some(tag.value.to_string()),
+                    StandardTagKey::Artist => self.artist = Some(tag.value.to_string()),
+                    StandardTagKey::Genre => self.genre = Some(tag.value.to_string()),
+                    StandardTagKey::TrackNumber => self.track_number = Some(tag.value.to_string()),
+                    _ => {},
                 }
-                push_to_sample_array(&resampled, &mut sample_array);
             }
-        };
+        }
     }
-    Ok(sample_array)
 }
 
-fn push_to_sample_array(frame: &ffmpeg::frame::Audio, sample_array: &mut Vec<f32>) {
-    if frame.samples() == 0 {
-        return;
+fn convert_sample_buffer(buffer_in: AudioBufferRef) -> AudioBuffer<f32>  {
+    match buffer_in {
+        AudioBufferRef::F32(buf) => buf.into_owned(),
+        AudioBufferRef::F64(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist (but since we know we're going to replace them right away, rendering doesn't have to do anything)
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::S16(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::S24(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::S32(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::S8(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::U16(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::U24(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::U32(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
+        AudioBufferRef::U8(buf) => {
+            let mut buffer_out = buf.make_equivalent::<f32>();
+            // symphonia expects frames to already exist
+            buffer_out.render(Some(buf.frames()), |_, _| Ok(())).unwrap_or(());
+            buf.convert(&mut buffer_out);
+            buffer_out
+        },
     }
-    // Account for the padding
-    let actual_size = util::format::sample::Buffer::size(
-        Sample::F32(Type::Packed),
-        CHANNELS,
-        frame.samples(),
-        false,
-    );
-    let f32_frame: Vec<f32> = frame.data(0)[..actual_size]
-        .chunks_exact(4)
-        .map(|x| {
-            let mut a: [u8; 4] = [0; 4];
-            a.copy_from_slice(x);
-            f32::from_le_bytes(a)
-        })
-        .collect();
-    sample_array.extend_from_slice(&f32_frame);
+}
+
+
+fn sample_buffer_length(buffer_in: AudioBufferRef) -> usize  {
+    match buffer_in {
+        AudioBufferRef::F32(buf) => buf.frames(),
+        AudioBufferRef::F64(buf) => buf.frames(),
+        AudioBufferRef::S16(buf) => buf.frames(),
+        AudioBufferRef::S24(buf) => buf.frames(),
+        AudioBufferRef::S32(buf) => buf.frames(),
+        AudioBufferRef::S8(buf) => buf.frames(),
+        AudioBufferRef::U16(buf) => buf.frames(),
+        AudioBufferRef::U24(buf) => buf.frames(),
+        AudioBufferRef::U32(buf) => buf.frames(),
+        AudioBufferRef::U8(buf) => buf.frames(),
+    }
+}
+
+fn resample_buffer(
+    rx: Receiver<AudioBuffer<f32>>,
+    mut sample_array: Vec<f32>,
+) -> BlissResult<Vec<f32>> {
+    let mut resample_buffer = Vec::<f32>::new();
+    let mut resampler_cache = std::collections::HashMap::<(u32, usize), ResamplerImpl<f32>>::new();
+    let mut wave_out_buffer = [Vec::<f32>::new()];
+    for decoded in rx.iter() {
+        //dbg!(decoded.frames());
+        if decoded.planes().planes().is_empty() || decoded.frames() < 5 {
+            // buffers that are too small cause resampler to panic
+            // due to chunk rounding down to 0
+            continue;
+        }
+        resample_buffer.clear();
+        // do resampling ourselves since symphonia doesn't
+        let frame_count = decoded.frames();
+        let in_sample_rate = decoded.spec().rate;
+        let audio_planes = decoded.planes();
+        let planes = audio_planes.planes();
+        let planes_len = planes.len() as f32;
+        for i in 0..frame_count {
+            // average samples into Mono track
+            let mut avg_sample = 0.0;
+            for plane in planes {
+                avg_sample += plane[i] / planes_len;
+            }
+            resample_buffer.push(avg_sample);
+        }
+        // build resampler
+        let cache_key = (in_sample_rate, resample_buffer.len());
+        let resampler = if let Some(resampler) = resampler_cache.get_mut(&cache_key) {
+            resampler
+        } else {
+            let new_resampler = ResamplerImpl::new(
+                in_sample_rate as _,
+                SAMPLE_RATE as _,
+                resample_buffer.len(),
+                8,
+                1
+            ).map_err(|e| BlissError::DecodingError(format!("Resampler init failure: {}", e)))?;
+            resampler_cache.insert(cache_key, new_resampler);
+            resampler_cache.get_mut(&cache_key).unwrap()
+        };
+        // resample
+        resampler.process_into_buffer(
+            &[resample_buffer.as_slice()],
+            &mut wave_out_buffer,
+            None,
+        ).map_err(|e| BlissError::DecodingError(format!("Resampler processing error: {}", e)))?;
+        sample_array.append(&mut wave_out_buffer[0]);
+    }
+    Ok(sample_array)
 }
 
 #[cfg(test)]
@@ -929,14 +917,12 @@ mod tests {
         assert_eq!(
             Song::decode(Path::new("nonexistent")).unwrap_err(),
             BlissError::DecodingError(String::from(
-                "while opening format for file 'nonexistent': ffmpeg::Error(2: No such file or directory)."
+                "while opening song: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }."
             )),
         );
         assert_eq!(
             Song::decode(Path::new("data/picture.png")).unwrap_err(),
-            BlissError::DecodingError(String::from(
-                "No audio stream found for file 'data/picture.png'."
-            )),
+            BlissError::DecodingError(String::from("while opening format: Unsupported(\"core (probe): no suitable format reader found\").")),
         );
     }
 
