@@ -315,6 +315,38 @@ impl Song {
         })
     }
 
+    /// Returns a decoded [Song] given an array of samples, or an error if the song
+    /// could not be analyzed for some reason.
+    ///
+    /// # Arguments
+    ///
+    /// * `samples` - A [Vec] of samples at [SAMPLE_RATE].
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the analysis could not be conducted for some reason.
+    ///
+    /// The error type returned should give a hint as to whether it was a
+    /// decoding ([DecodingError](BlissError::DecodingError)) or an analysis
+    /// ([AnalysisError](BlissError::AnalysisError)) error.
+    pub fn from_samples(samples: Vec<f32>) -> BlissResult<Self> {
+        let raw_song = Song::decode_samples(samples)?;
+
+        Ok(Song {
+            path: raw_song.path,
+            artist: raw_song.artist,
+            album_artist: raw_song.album_artist,
+            title: raw_song.title,
+            album: raw_song.album,
+            track_number: raw_song.track_number,
+            genre: raw_song.genre,
+            duration: raw_song.duration,
+            analysis: Song::analyze(&raw_song.sample_array)?,
+            features_version: FEATURES_VERSION,
+            cue_info: None,
+        })
+    }
+
     /**
      * Analyze a song decoded in `sample_array`, with one channel @ 22050 Hz.
      *
@@ -419,6 +451,17 @@ impl Song {
             Ok(Analysis::new(array))
         })
         .unwrap()
+    }
+
+    pub(crate) fn decode_samples(samples: Vec<f32>) -> BlissResult<InternalSong> {
+        let duration_seconds = samples.len() as f32 / SAMPLE_RATE as f32;
+        let song = InternalSong {
+            path: "".into(),
+            duration: Duration::from_nanos((duration_seconds * 1e9_f32).round() as u64),
+            sample_array: samples,
+            ..Default::default()
+        };
+        Ok(song)
     }
 
     pub(crate) fn decode(path: &Path) -> BlissResult<InternalSong> {
